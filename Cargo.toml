@@ -1,0 +1,7 @@
+[package]
+name = "whisky"
+version = "0.1.0"
+authors = ["qres <qres@users.noreply.github.com>"]
+
+[dependencies]
+ndarray = "0.9.*" 
