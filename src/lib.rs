@@ -2,7 +2,7 @@
 
 extern crate ndarray;
 
-use ndarray::{Array1, Array2};
+use marke::{Linear, Symmetric};
 
 pub mod stencil;
 pub mod multigrid;
@@ -209,8 +209,8 @@ impl BreakCondition for NoResCeck {
 }
 
 pub struct Id;
-impl marke::Symmetric for Id {}
-impl marke::Linear for Id {}
+impl Symmetric for Id {}
+impl Linear for Id {}
 
 impl Id {
     pub fn new() -> Self {
@@ -240,21 +240,25 @@ impl<V> Preconditioner<V> for Id where V: Vector {
 }
 
 
+/// Using the Neumann Series to approximate the inverse of a Matrix.
+///
+/// ```text
 /// A = I - B such that ||B|| < 1 for some norm ||.||
 ///
 /// M_inv ~= A_inv = sum (I - A)^m = I + (I - A) + (I-A)^2 + ...
 /// Using Horner Scheme
 /// m=0: M_0_inv = I
-/// m=1: M_1_inv = I + (I-A)           = I + (I-A)M_1_inv
+/// m=1: M_1_inv = I + (I-A)           = I + (I-A)M_0_inv
 /// m=2: M_2_inv = I + (I-A) + (I-A)^2 = I + (I-A)M_1_inv
 /// m=k: M_k_inv = I +  ...  + (I-A)^k = I + (I-A)M_k-1_inv
+/// ```
 pub struct NeumannSeries<M> {
     order: usize,
     scale: f64,
     A: M,
 }
-impl<M> marke::Symmetric for NeumannSeries<M> where M: marke::Symmetric {}
-impl<M> marke::Linear for NeumannSeries<M> where M: marke::Linear {}
+impl<M> Symmetric for NeumannSeries<M> where M: Symmetric {}
+impl<M> Linear for NeumannSeries<M> where M: Linear {}
 
 impl<M> NeumannSeries<M> {
     pub fn new(order: usize, A: M) -> Self {
@@ -282,6 +286,7 @@ impl<V,M> Preconditioner<V> for NeumannSeries<M> where V: Vector, M: Matrix<V> {
 
         // we can only use the 'scaling' code if order > 0
         if self.scale != 1.0 && self.order > 0 {
+            //// h = x
             h.set_copy(x);
             // first iterations
             for _ in 1..self.order {
@@ -312,8 +317,8 @@ pub struct Restart<S>{
     count: u32,
     solver: S,
 }
-impl<S> marke::Symmetric for Restart<S> where S: marke::Symmetric {}
-impl<S> marke::Linear for Restart<S> where S: marke::Linear {}
+impl<S> Symmetric for Restart<S> where S: Symmetric {}
+impl<S> Linear for Restart<S> where S: Linear {}
 
 impl<S> Restart<S> {
     pub fn new(count: u32, solver: S) -> Self {
@@ -340,8 +345,8 @@ pub struct Concat<S1, S2> {
     solver1: S1,
     solver2: S2,
 }
-impl<S1,S2> marke::Symmetric for Concat<S1,S2> where S1: marke::Symmetric, S2: marke::Symmetric {}
-impl<S1,S2> marke::Linear for Concat<S1,S2> where S1: marke::Linear, S2: marke::Linear {}
+impl<S1,S2> Symmetric for Concat<S1,S2> where S1: Symmetric, S2: Symmetric {}
+impl<S1,S2> Linear for Concat<S1,S2> where S1: Linear, S2: Linear {}
 
 impl<S1,S2> Concat<S1,S2> {
 
@@ -365,7 +370,7 @@ pub struct CG<F,FR> where F: BreakCondition {
     per_iter: F,
     inspect_res: FR,
 }
-impl<FR> marke::Linear for CG<NoResCeck,FR> {}
+impl<FR> Linear for CG<NoResCeck,FR> {}
 
 // we split the implementation to improve type inferrence
 impl<F> CG<F, fn(u32, f64)> where F: BreakCondition,  {
@@ -431,7 +436,7 @@ impl<V,F,FR> SolverImpl<V> for CG<F,FR> where V: Vector, F: BreakCondition, FR: 
                 break 'iteration;
             }
             //// p = a_k+1 / a * p + r
-            p.acc_mul_bx(alpha_kp1 / alpha, 1.0,&r);
+            p.acc_mul_bx(alpha_kp1 / alpha, 1.0, &r);
             //// a_k = a_k+1
             alpha = alpha_kp1;
         }
@@ -443,7 +448,7 @@ pub struct PCG<F,P,FR> where F: BreakCondition {
     cg: CG<F,FR>,
     preconditioner: P,
 }
-impl<P,FR> marke::Linear for PCG<NoResCeck,P,FR> where P: marke::Linear {}
+impl<P,FR> Linear for PCG<NoResCeck,P,FR> where P: Linear {}
 
 impl<F,P,FR> PCG<F,P,FR> where F: BreakCondition {
     pub fn new(p: P, cg: CG<F,FR>) -> Self {
