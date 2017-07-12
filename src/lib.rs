@@ -239,8 +239,28 @@ impl<V> Preconditioner<V> for Id where V: Vector {
     }
 }
 
+/// Applies `A^-1` as preconditioner using a solver to solve `A^-1 x`
+pub struct InvMatrix<M, S> {
+    A: M,
+    solver: S,
+}
+impl<M,S> Symmetric for InvMatrix<M,S> where S: Symmetric, M: Symmetric {}
+impl<M,S> Linear for InvMatrix<M,S> where S: Linear, M: Linear {}
+
+impl<V, M, S> Preconditioner<V> for InvMatrix<M, S> where M: Matrix<V>, S: SolverImpl<V> {
+    fn size(&self) -> usize {
+        self.solver.size()
+    }
+
+    fn apply(&self, out: &mut V, x: &V, vecs: &mut [V]) {
+        //// out = A^-1 x
+        self.solver.solve(&self.A, out, x, vecs)
+    }
+}
+
 
 /// Using the Neumann Series to approximate the inverse of a Matrix.
+/// This is equivalent to a Richardson iteration.
 ///
 /// ```text
 /// A = I - B such that ||B|| < 1 for some norm ||.||
@@ -285,7 +305,7 @@ impl<V,M> Preconditioner<V> for NeumannSeries<M> where V: Vector, M: Matrix<V> {
         let mut z = vecs.iter_mut().next().expect("vector buffer too small");
 
         // we can only use the 'scaling' code if order > 0
-        if self.scale != 1.0 && self.order > 0 {
+        if self.order > 0 {
             //// h = x
             h.set_copy(x);
             // first iterations
@@ -467,7 +487,7 @@ impl<V,F,P,FR> SolverImpl<V> for PCG<F,P,FR> where V: Vector, F: BreakCondition,
     }
 
     fn solve<M>(&self, A: &M, x: &mut V, b: &V, vecs: &mut [V]) where M: Matrix<V> {
-        let (mut vecs, mut rest) = vecs.split_at_mut(self.size());
+        let (mut vecs, mut rest) = vecs.split_at_mut(4);
         let mut vecs = vecs.iter_mut();
         let mut r = vecs.next().expect("vector buffer too small");
         let mut p = vecs.next().expect("vector buffer too small");
