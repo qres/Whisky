@@ -5,6 +5,7 @@ extern crate ndarray;
 use marke::{Linear, Symmetric};
 
 pub mod stencil;
+pub mod jacobi;
 pub mod multigrid;
 pub mod marke;
 
@@ -29,6 +30,7 @@ pub trait Vector {
     }
     fn norm_max(&self) -> f64;
     fn set_copy(&mut self, src: &Self);
+    fn set_ax(&mut self, a: f64, src: &Self);
     fn set_axpy(&mut self, a: f64, x: &Self, y: &Self);
     fn inc_ax(&mut self, a: f64, x: &Self) {
         self.acc_mul_bx(1.0, a, x);
@@ -93,6 +95,61 @@ mod nd {
             *self = src.clone()
         }
 
+        fn set_ax(&mut self, a: f64, src: &Self) {
+            *self = a * src
+        }
+
+        fn set_axpy(&mut self, a: f64, x: &Self, y: &Self) {
+            Zip::from(self).and(x).and(y).apply(|s,x,y| {
+                *s = a * x + y
+            });
+        }
+
+        fn inc_axpby(&mut self, a: f64, x: &Self, b: f64, y: &Self) {
+            Zip::from(self).and(x).and(y).apply(|s,x,y| {
+                *s += a * x + b * y
+            });
+        }
+
+        fn acc_mul_bx(&mut self, a: f64, b: f64, x: &Self) {
+            Zip::from(self).and(x).apply(|acc,x| {
+                *acc = a * *acc + b * x
+            });
+        }
+
+        fn acc_mul_bxpy(&mut self, a: f64, b: f64, x: &Self, y: &Self) {
+            Zip::from(self).and(x).and(y).apply(|acc,x,y| {
+                *acc = a * *acc + b * x + y
+            });
+        }
+
+    }
+
+    impl Vector for Array2<f64> {
+        fn dot(&self, other: &Self) -> f64 {
+            let mut sum = 0.0;
+            for i in 0..self.shape()[0] {
+                for j in 0..self.shape()[1] {
+                    sum += self[[i,j]] * other[[i,j]]
+                }
+            }
+            sum
+        }
+
+        fn norm_max(&self) -> f64 {
+            self.fold(0.0, |acc, elem| {
+                acc.max(elem.abs())
+            })
+        }
+
+        fn set_copy(&mut self, src: &Self) {
+            *self = src.clone()
+        }
+
+        fn set_ax(&mut self, a: f64, src: &Self) {
+            *self = a * src
+        }
+
         fn set_axpy(&mut self, a: f64, x: &Self, y: &Self) {
             Zip::from(self).and(x).and(y).apply(|s,x,y| {
                 *s = a * x + y
@@ -134,6 +191,8 @@ mod nd {
     }
 
     impl Preconditioner<Array1<f64>> for Array2<f64> {
+        type A = [Array1<f64>];
+
         fn size(&self) -> usize {
             0
         }
@@ -145,6 +204,8 @@ mod nd {
     }
 
     impl<'a> Preconditioner<Array1<f64>> for ArrayView1<'a, f64> {
+        type A = [Array1<f64>];
+
         fn size(&self) -> usize {
             0
         }
@@ -159,34 +220,39 @@ mod nd {
 }
 
 
-pub struct Solver<V,S> {
+// TODO: I don't like this
+pub struct Solver<M,V,S> {
     solver: S,
     vectors: Vec<V>,
+    booh: std::marker::PhantomData<M>,
 }
 
-impl<V,S> Solver<V,S> where V: Vector, S: SolverImpl<V> {
+impl<M,V,S> Solver<M,V,S> where V: Vector, M: Matrix<V>, S: SolverImpl<M,V,A=[V]> {
     pub fn new(vecs: Vec<V>, solver: S) -> Self {
         // we implicitly assume, that the size of the individual vectors is correct TODO
         assert!(vecs.len() >= solver.size());
         Solver {
             vectors: vecs, // TODO pre allocate
             solver: solver,
+            booh: std::marker::PhantomData,
         }
     }
 
-    pub fn solve<M>(&mut self, A: &M, x: &mut V, b: &V) where M: Matrix<V> {
+    pub fn solve(&mut self, A: &M, x: &mut V, b: &V) {
         self.solver.solve(A, x, b, &mut self.vectors);
     }
 }
 
-pub trait SolverImpl<V> {
+pub trait SolverImpl<M,V> {
+    type A: ?Sized;
     fn size(&self) -> usize;
-    fn solve<M>(&self, A: &M, x: &mut V, b: &V, vecs: &mut [V]) where M: Matrix<V>;
+    fn solve(&self, A: &M, x: &mut V, b: &V, vecs: &mut Self::A);
 }
 
 pub trait Preconditioner<V> {
+    type A: ?Sized;
     fn size(&self) -> usize;
-    fn apply(&self, out: &mut V, x: &V, vecs: &mut [V]);
+    fn apply(&self, out: &mut V, x: &V, vecs: &mut Self::A);
 }
 
 pub trait BreakCondition {
@@ -208,6 +274,8 @@ impl BreakCondition for NoResCeck {
     }
 }
 
+pub struct DiagSolver;
+
 pub struct Id;
 impl Symmetric for Id {}
 impl Linear for Id {}
@@ -218,24 +286,54 @@ impl Id {
     }
 }
 
-impl<V> SolverImpl<V> for Id where V: Vector {
+impl<V> SolverImpl<Id,V> for DiagSolver where V: Vector {
+    type A = [V];
     fn size(&self) -> usize {
         0
     }
 
-    fn solve<M>(&self, _: &M, x: &mut V, b: &V, _: &mut [V]) where M: Matrix<V> {
+    fn solve(&self, _: &Id, x: &mut V, b: &V, _: &mut [V]) {
         // nothing to do
         x.set_copy(b);
     }
 }
 
 impl<V> Preconditioner<V> for Id where V: Vector {
+    type A = [V];
     fn size(&self) -> usize {
         0
     }
 
     fn apply(&self, out: &mut V, x: &V, _: &mut [V]) {
         out.set_copy(x);
+    }
+}
+
+/// constant
+impl Symmetric for f64 {}
+impl Linear for f64 {}
+
+impl<V> SolverImpl<f64,V> for DiagSolver where V: Vector {
+    type A = [V];
+    fn size(&self) -> usize {
+        0
+    }
+
+    fn solve(&self, scalar: &f64, x: &mut V, b: &V, _: &mut [V]) {
+        // oh, thats easy! ;)
+        //// x = 1 / scalar * b
+        x.acc_mul_bx(0.0, 1.0 / scalar, b);
+    }
+}
+
+impl<V> Preconditioner<V> for f64 where V: Vector {
+    type A = [V];
+    fn size(&self) -> usize {
+        0
+    }
+
+    fn apply(&self, out: &mut V, x: &V, _: &mut [V]) {
+        out.set_ax(1.0 / *self, x); // TODO this schould be *self only XXX
     }
 }
 
@@ -247,7 +345,8 @@ pub struct InvMatrix<M, S> {
 impl<M,S> Symmetric for InvMatrix<M,S> where S: Symmetric, M: Symmetric {}
 impl<M,S> Linear for InvMatrix<M,S> where S: Linear, M: Linear {}
 
-impl<V, M, S> Preconditioner<V> for InvMatrix<M, S> where M: Matrix<V>, S: SolverImpl<V> {
+impl<V, M, S> Preconditioner<V> for InvMatrix<M, S> where M: Matrix<V>, S: SolverImpl<M,V,A=[V]> {
+    type A = [V];
     fn size(&self) -> usize {
         self.solver.size()
     }
@@ -263,7 +362,7 @@ impl<V, M, S> Preconditioner<V> for InvMatrix<M, S> where M: Matrix<V>, S: Solve
 /// This is equivalent to a Richardson iteration.
 ///
 /// ```text
-/// A = I - B such that ||B|| < 1 for some norm ||.||
+/// A = I - B such that ||B|| = ||I-A|| < 1 for some norm ||.||
 ///
 /// M_inv ~= A_inv = sum (I - A)^m = I + (I - A) + (I-A)^2 + ...
 /// Using Horner Scheme
@@ -296,39 +395,34 @@ impl<M> NeumannSeries<M> {
 }
 
 impl<V,M> Preconditioner<V> for NeumannSeries<M> where V: Vector, M: Matrix<V> {
+    type A = [V];
     fn size(&self) -> usize {
         1
     }
 
     fn apply(&self, out: &mut V, x: &V, vecs: &mut [V]) {
-        let mut h = out;
-        let mut z = vecs.iter_mut().next().expect("vector buffer too small");
-
-        // we can only use the 'scaling' code if order > 0
         if self.order > 0 {
+            let mut h = out;
+            let mut z = vecs.iter_mut().next().expect("vector buffer too small");
             //// h = x
             h.set_copy(x);
             // first iterations
+            // we use s*A insted of A, i.e. we approximate (sA)^-1 = 1/s A^-1
+            // => s(sA)^-1 = A^-1
             for _ in 1..self.order {
-                //// h = h + x - A h
-                //          ^~ =:z ~^
+                //// h = h + x - s A h
+                //          ^~  =:z  ~^
                 M::aAxpby(&mut z, -self.scale, &self.A, &h, 1.0, x);
                 h.inc_ax(1.0, z);
             }
             // last iteration
-            //// h = h + x - A h
-            //          ^~ =:z ~^
+            //// h = s (h + x - s A h)
+            ////           ^~  =:z  ~^
             M::aAxpby(&mut z, -self.scale, &self.A, &h, 1.0, x);
-            h.acc_mul_bx(1.0/self.scale, 1.0/self.scale, z);
+            // undo scaling: A^-1 = s(sA)^-1
+            h.acc_mul_bx(self.scale, self.scale, z);
         } else {
-            //// h = x
-            h.set_copy(x);
-            for _ in 1..self.order+1 {
-                //// h = h + x - A h
-                //          ^~ =:z ~^
-                M::aAxpby(&mut z, -1.0, &self.A, &h, 1.0, x);
-                h.inc_ax(1.0, z);
-            }
+            out.set_copy(x);
         }
     }
 }
@@ -349,12 +443,13 @@ impl<S> Restart<S> {
     }
 }
 
-impl<V,S> SolverImpl<V> for Restart<S> where V: Vector, S: SolverImpl<V> {
+impl<M,V,S> SolverImpl<M,V> for Restart<S> where M: Matrix<V>, V: Vector, S: SolverImpl<M,V,A=[V]> {
+    type A = [V];
     fn size(&self) -> usize {
         0
     }
 
-    fn solve<M>(&self, A: &M, x: &mut V, b: &V, vecs: &mut [V]) where M: Matrix<V> {
+    fn solve(&self, A: &M, x: &mut V, b: &V, vecs: &mut [V]) {
         for _ in 0..self.count {
             self.solver.solve(A, x, b, vecs);
         }
@@ -372,14 +467,15 @@ impl<S1,S2> Concat<S1,S2> {
 
 }
 
-impl<V,S1,S2> SolverImpl<V> for Concat<S1,S2> where V: Vector, S1: SolverImpl<V>, S2: SolverImpl<V> {
+impl<M,V,S1,S2> SolverImpl<M,V> for Concat<S1,S2> where M: Matrix<V>, V: Vector, S1: SolverImpl<M,V,A=[V]>, S2: SolverImpl<M,V,A=[V]> {
+    type A = [V];
     fn size(&self) -> usize {
         let s1 = self.solver1.size();
         let s2 = self.solver2.size();
         cmp::max(s1, s2)
     }
 
-    fn solve<M>(&self, A: &M, x: &mut V, b: &V, vecs: &mut [V]) where M: Matrix<V> {
+    fn solve(&self, A: &M, x: &mut V, b: &V, vecs: &mut [V]) {
         self.solver1.solve(A, x, b, vecs);
         self.solver2.solve(A, x, b, vecs);
     }
@@ -412,12 +508,13 @@ impl<F,FR> CG<F, FR> where F: BreakCondition {
     }
 }
 
-impl<V,F,FR> SolverImpl<V> for CG<F,FR> where V: Vector, F: BreakCondition, FR: Fn(u32, f64) {
+impl<M,V,F,FR> SolverImpl<M,V> for CG<F,FR> where M: Matrix<V>, V: Vector, F: BreakCondition, FR: Fn(u32, f64) {
+    type A = [V];
     fn size(&self) -> usize {
         3
     }
 
-    fn solve<M>(&self, A: &M, x: &mut V, b: &V, vecs: &mut [V]) where M: Matrix<V> {
+    fn solve(&self, A: &M, x: &mut V, b: &V, vecs: &mut [V]) {
         // TODO slice pattern
         let mut vecs = vecs.iter_mut();
         let mut r = vecs.next().expect("vector buffer too small");
@@ -451,8 +548,8 @@ impl<V,F,FR> SolverImpl<V> for CG<F,FR> where V: Vector, F: BreakCondition, FR: 
             //// a_k+1 = ||r||^2
             let alpha_kp1 = r.norm2_sq();
 
-            (self.inspect_res)(k+1, alpha.sqrt());
-            if !self.per_iter.continue_iter(r.norm2_sq().sqrt()) || alpha_kp1 == 0.0 {
+            (self.inspect_res)(k+1, alpha_kp1.sqrt());
+            if !self.per_iter.continue_iter(alpha_kp1.sqrt()) || alpha_kp1 == 0.0 {
                 break 'iteration;
             }
             //// p = a_k+1 / a * p + r
@@ -479,14 +576,15 @@ impl<F,P,FR> PCG<F,P,FR> where F: BreakCondition {
     }
 }
 
-impl<V,F,P,FR> SolverImpl<V> for PCG<F,P,FR> where V: Vector, F: BreakCondition, P: Preconditioner<V>, FR: Fn(u32, f64) {
+impl<M,V,F,P,FR> SolverImpl<M,V> for PCG<F,P,FR> where M: Matrix<V>, V: Vector, F: BreakCondition, P: Preconditioner<V,A=[V]>, FR: Fn(u32, f64) {
+    type A = [V];
     fn size(&self) -> usize {
         let pc_hint = self.preconditioner.size();
         let pcg_min = 4;
         pcg_min + pc_hint
     }
 
-    fn solve<M>(&self, A: &M, x: &mut V, b: &V, vecs: &mut [V]) where M: Matrix<V> {
+    fn solve(&self, A: &M, x: &mut V, b: &V, vecs: &mut [V]) {
         let (mut vecs, mut rest) = vecs.split_at_mut(4);
         let mut vecs = vecs.iter_mut();
         let mut r = vecs.next().expect("vector buffer too small");
@@ -563,12 +661,13 @@ impl<F,FR> BiCGStab<F,FR> where F: BreakCondition {
     }
 }
 
-impl<V,F,FR> SolverImpl<V> for BiCGStab<F,FR> where V: Vector, F: BreakCondition, FR: Fn(u32,f64) {
+impl<M,V,F,FR> SolverImpl<M,V> for BiCGStab<F,FR> where M: Matrix<V>, V: Vector, F: BreakCondition, FR: Fn(u32,f64) {
+    type A = [V];
     fn size(&self) -> usize {
         6
     }
 
-    fn solve<M>(&self, A: &M, x: &mut V, b: &V, vecs: &mut [V]) where M: Matrix<V> {
+    fn solve(&self, A: &M, x: &mut V, b: &V, vecs: &mut [V]) {
         let mut vecs = vecs.iter_mut();
         let mut r = vecs.next().expect("vector buffer too small");
         let mut r0 = vecs.next().expect("vector buffer too small");
@@ -637,7 +736,7 @@ mod test {
 
     const N: u32 = 101;
 
-    fn test_convergence<S>(solver: &mut Solver<Array1<f64>,S>) where S: SolverImpl<Array1<f64>> {
+    fn test_convergence<S>(solver: &mut Solver<Array2<f64>,Array1<f64>,S>) where S: SolverImpl<Array2<f64>,Array1<f64>,A=[Array1<f64>]> {
         use ndarray::Dim;
         let h = 1.0/(N-1) as f64;
         let A = -1.0/h/h*Array2::from_shape_fn(Dim([N as usize, N as usize]), |(i,j)| {
@@ -737,7 +836,8 @@ mod test {
         let h = 1.0/(N-1) as f64;
         let A = -1.0/h/h*Array2::<f64>::from_shape_fn(Dim([N as usize, N as usize]), |(i,j)| {
             if i==j {
-                return -2.0
+                // make it strictly diagonal dominant
+                return -4.0
             }
             if i+1==j {
                 return 1.0
@@ -757,8 +857,8 @@ mod test {
         let mut solver = Solver::new(
             vecs,
             PCG::new(
-                // scale the Matrix such that ||B|| < 1
-                NeumannSeries::new(3, &A).scale(0.5*h*h),
+                // scale the Matrix such that ||B||_oo < 1
+                NeumannSeries::new(3, &A).scale(0.25*h*h),
                 CG::new(N, NoResCeck()),
             )
         );
